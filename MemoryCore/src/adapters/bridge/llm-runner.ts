@@ -19,10 +19,16 @@
  *    `usage` is still reported so MetricTrackingRunner keeps working.
  *  - Caller-supplied `params.tools` CANNOT cross the process boundary — see
  *    the note in `run()`.
+ *  - `params.storage` IS supported, but by staging rather than by bridging the
+ *    tools: the prefix is copied to a temp dir, the CLI works there, and
+ *    changes are written back. See `storage-staging.ts`.
  */
 
 import { spawn } from "node:child_process";
+import fsPromises from "node:fs/promises";
 import { report } from "../../core/report/reporter.js";
+import { stageFromStorage, syncBackToStorage } from "./storage-staging.js";
+import type { StagedWorkspace } from "./storage-staging.js";
 import type {
   LLMRunner,
   LLMRunParams,
@@ -155,26 +161,36 @@ export class BridgeLLMRunner implements LLMRunner {
       );
     }
 
-    // `params.storage` selects storage-backed tools in the standalone runner
-    // (COS service mode). The CLI only reaches the local filesystem, so a
-    // storage-backed run would silently read the wrong files.
+    // `params.storage` selects storage-backed tools in the standalone runner,
+    // which hands the model in-process closures over StorageAdapter. A
+    // subprocess cannot receive those, and the CLI's Read/Write/Edit only see
+    // the real filesystem — so stage the prefix into a temp dir, let the CLI
+    // work there, and sync changes back afterwards.
+    //
+    // This is not COS-only: the standalone gateway sets a local-backed
+    // StorageAdapter too, so L2 scene extraction takes this path in the
+    // default single-machine config.
+    let workspace: StagedWorkspace | undefined;
+    let runCwd = cwd;
     if (effectiveEnableTools && params.storage) {
-      throw new Error(
-        `${TAG} storage-backed tools are not supported by the bridge runner ` +
-        `(taskId=${params.taskId}). The spawned CLI sees the local filesystem, ` +
-        `not the StorageAdapter.`,
+      workspace = await stageFromStorage(
+        params.storage,
+        params.storagePrefix ?? "",
+        this.logger,
       );
+      runCwd = workspace.dir;
     }
 
-    const args = this.buildArgs(params, { effectiveEnableTools, maxIterations, cwd });
+    const args = this.buildArgs(params, { effectiveEnableTools, maxIterations, cwd: runCwd });
 
     this.logger?.debug?.(
       `${TAG} run() start: taskId=${params.taskId}, model=${this.model ?? "cli-default"}, ` +
-      `tools=${effectiveEnableTools}, timeout=${timeoutMs}ms, cwd=${cwd}`,
+      `tools=${effectiveEnableTools}, timeout=${timeoutMs}ms, cwd=${runCwd}` +
+      `${workspace ? ` (staged ${workspace.staged.size} object(s))` : ""}`,
     );
 
     try {
-      const raw = await this.spawnClaude(args, { cwd, timeoutMs, abortSignal: params.abortSignal });
+      const raw = await this.spawnClaude(args, { cwd: runCwd, timeoutMs, abortSignal: params.abortSignal });
       const parsed = this.parseResult(raw);
       const text = (parsed.result ?? "").trim();
       const totalMs = Date.now() - runStartMs;
@@ -230,10 +246,28 @@ export class BridgeLLMRunner implements LLMRunner {
         });
       }
 
+      // Only on success. When the run failed the workspace may hold partial
+      // writes, and callers like SceneExtractor restore from their own backup
+      // on a thrown error — syncing here would defeat that.
+      if (workspace && params.storage) {
+        await syncBackToStorage(
+          params.storage,
+          params.storagePrefix ?? "",
+          workspace,
+          this.logger,
+        );
+        workspace = undefined; // syncBack removes the dir; don't double-clean
+      }
+
       return text;
     } catch (err) {
       const totalMs = Date.now() - runStartMs;
       const errMsg = err instanceof Error ? err.message : String(err);
+
+      // Discard the staged dir without syncing — see above.
+      if (workspace) {
+        await fsPromises.rm(workspace.dir, { recursive: true, force: true }).catch(() => {});
+      }
       this.logger?.error(`${TAG} run() failed after ${totalMs}ms: ${errMsg}`);
 
       if (params.instanceId) {
