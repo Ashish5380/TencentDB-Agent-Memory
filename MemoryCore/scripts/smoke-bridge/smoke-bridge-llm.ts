@@ -12,6 +12,9 @@
  *   3. an unreachable binary produces a diagnosable error, not a hang
  */
 
+import fsPromises from "node:fs/promises";
+import path from "node:path";
+import { tmpdir } from "node:os";
 import { BridgeLLMRunnerFactory } from "../../src/adapters/bridge/index.js";
 import type { Logger } from "../../src/core/types.js";
 
@@ -53,6 +56,22 @@ async function main() {
     timeoutMs: 120_000,
   });
   check("append-system-prompt applied", sysText.includes("BRIDGE42"), JSON.stringify(sysText.slice(0, 60)));
+
+  // --- 2b. tool-enabled run -------------------------------------------------
+  // The riskiest path: --permission-mode acceptEdits + an explicit
+  // Read/Write/Edit allowlist, with file paths resolved against workspaceDir.
+  console.log("\n2b. tool-enabled run reads a file in the workspace");
+  const wsDir = await fsPromises.mkdtemp(path.join(tmpdir(), "bridge-smoke-"));
+  await fsPromises.writeFile(path.join(wsDir, "note.txt"), "the answer is 7741\n");
+  const toolRunner = factory.createRunner({ enableTools: true });
+  const readBack = await toolRunner.run({
+    prompt: "Read note.txt in the current directory and reply with only the number it contains.",
+    taskId: "smoke-tools-read",
+    workspaceDir: wsDir,
+    timeoutMs: 180_000,
+  });
+  check("Read tool resolved against workspaceDir", readBack.includes("7741"), JSON.stringify(readBack.slice(0, 60)));
+  await fsPromises.rm(wsDir, { recursive: true, force: true });
 
   // --- 3. caller tools rejected --------------------------------------------
   console.log("\n3. caller-provided tools fail loudly");

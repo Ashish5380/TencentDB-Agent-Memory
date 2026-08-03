@@ -443,8 +443,10 @@ export function loadGatewayConfig(overrides?: Partial<GatewayConfig>): GatewayCo
   const llmConfig = obj(fileConfig, "llm");
   const llmProxyConfig = obj(llmConfig, "proxy");
   const rawLlmProvider = env("TDAI_LLM_PROVIDER") ?? str(llmConfig, "provider");
-  const llmProvider: "openai" | "proxy" =
-    rawLlmProvider === "proxy" ? "proxy" : "openai";
+  const llmProvider: "openai" | "proxy" | "bridge" =
+    rawLlmProvider === "proxy" ? "proxy"
+      : rawLlmProvider === "bridge" ? "bridge"
+        : "openai";
   const llm: StandaloneLLMConfig = {
     baseUrl: env("TDAI_LLM_BASE_URL") ?? str(llmConfig, "baseUrl") ?? "https://api.openai.com/v1",
     apiKey: env("TDAI_LLM_API_KEY") ?? str(llmConfig, "apiKey") ?? "",
@@ -475,8 +477,10 @@ export function loadGatewayConfig(overrides?: Partial<GatewayConfig>): GatewayCo
   // requiring the user to duplicate the block under `memory.llm`.
   // provider=proxy 模式下即使 apiKey 为空也要 splice —— 因为最终 apiKey 由
   // memory systemUser.userKey 提供，llm.apiKey 只是 provider=openai 时的显式配置。
+  // provider=bridge 同理：本地 CLI 自己带凭证，baseUrl / apiKey 都不参与。
   const shouldSpliceLlm =
-    !memory.llm.enabled && llm.baseUrl && (llm.apiKey || llm.provider === "proxy");
+    !memory.llm.enabled && llm.baseUrl
+    && (llm.apiKey || llm.provider === "proxy" || llm.provider === "bridge");
   if (shouldSpliceLlm) {
     memory.llm = {
       enabled: true,

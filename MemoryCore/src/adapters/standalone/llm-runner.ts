@@ -93,8 +93,11 @@ export interface StandaloneLLMConfig {
    *   - "openai": 直连通用 OpenAI 兼容服务（默认，向后兼容）
    *   - "proxy":  走 context_proxy，运行时会自动把 baseUrl 拼成
    *               `${baseUrl}/proxy/<instanceId>/v1`，apiKey 用 metadata.systemUser.memory.userKey
+   *   - "bridge": 本地 `claude` CLI 子进程，无需 baseUrl / apiKey。gateway 会改用
+   *               BridgeHostAdapter，本 runner 不会被构造 —— 该值只在 config 层流转。
+   *               见 adapters/bridge/llm-runner.ts。
    */
-  provider?: "openai" | "proxy";
+  provider?: "openai" | "proxy" | "bridge";
   /** provider=proxy 时的可选配置。 */
   proxy?: {
     /** 是否用 memory systemUser.userKey 作为 Authorization（默认 true）。 */

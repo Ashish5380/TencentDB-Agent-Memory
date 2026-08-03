@@ -207,6 +207,16 @@ export class BridgeLLMRunner implements LLMRunner {
         `cost=$${parsed.total_cost_usd ?? 0}`,
       );
 
+      // The callers parse this text into JSON and silently return [] when the
+      // shape is unexpected, so there is no other way to see what the model
+      // actually said. Off by default — prompts and answers are user content.
+      if (process.env.TDAI_BRIDGE_DEBUG === "1") {
+        this.logger?.debug?.(
+          `${TAG} [raw] taskId=${params.taskId} systemLen=${params.systemPrompt?.length ?? 0} ` +
+          `promptLen=${params.prompt.length} output=${JSON.stringify(text.slice(0, 2048))}`,
+        );
+      }
+
       if (params.instanceId) {
         report("llm_call", {
           taskId: params.taskId,
@@ -265,11 +275,24 @@ export class BridgeLLMRunner implements LLMRunner {
       args.push("--max-turns", "1");
     }
 
-    // LLMRunParams.systemPrompt maps to --append-system-prompt rather than
-    // --system-prompt: the CLI's own system prompt is what makes it a working
-    // agent, and replacing it wholesale breaks tool use.
+    // Which system-prompt flag depends on whether we want an agent or a
+    // completion, and getting this wrong is silent:
+    //
+    //   text-only  → --system-prompt (REPLACE). This matches the standalone
+    //     runner, which passes `system: params.systemPrompt` as the whole
+    //     system prompt. Appending instead leaves Claude Code's own
+    //     coding-agent prompt dominant and the caller's instructions read as
+    //     an addendum — L1 extraction returned well-formed JSON with an empty
+    //     `memories` array on every run until this was switched to replace.
+    //
+    //   tool-enabled → --append-system-prompt. The default prompt is what
+    //     teaches the model to drive Read/Write/Edit; replacing it breaks
+    //     tool use.
     if (params.systemPrompt) {
-      args.push("--append-system-prompt", params.systemPrompt);
+      args.push(
+        opts.effectiveEnableTools ? "--append-system-prompt" : "--system-prompt",
+        params.systemPrompt,
+      );
     }
     if (this.model) {
       args.push("--model", this.model);

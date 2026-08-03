@@ -22,6 +22,7 @@ import zlib from "node:zlib";
 import dayjs from "dayjs";
 import { TdaiCore } from "../core/tdai-core.js";
 import { StandaloneHostAdapter } from "../adapters/standalone/host-adapter.js";
+import { BridgeHostAdapter } from "../adapters/bridge/host-adapter.js";
 import { loadGatewayConfig, parseBrokers } from "./config.js";
 import type { GatewayConfig } from "./config.js";
 import { applyMetadataEnvFromGatewayConfig } from "./metadata-env.js";
@@ -46,7 +47,7 @@ import type {
   SeedResponse,
   GatewayErrorResponse,
 } from "./types.js";
-import type { Logger } from "../core/types.js";
+import type { HostAdapter, Logger } from "../core/types.js";
 import { InstanceConfigProvider } from "../core/instance-config-provider.js";
 import { wrapWithTrace } from "../core/report/trace-middleware.js";
 import { initOTelSDK, shutdownOTelSDK } from "../core/report/otel-sdk-init.js";
@@ -316,12 +317,32 @@ export class TdaiGateway {
     this.logger = createConsoleLogger();
 
     // Create host adapter
-    const adapter = new StandaloneHostAdapter({
-      dataDir: this.config.data.baseDir,
-      llmConfig: this.config.llm,
-      logger: this.logger,
-      platform: "gateway",
-    });
+    //
+    // llm.provider=bridge swaps the HTTP+apiKey transport for a local `claude`
+    // CLI subprocess. Both adapters satisfy HostAdapter identically, so nothing
+    // downstream changes — but the bridge cannot serve caller-provided or
+    // storage-backed tools (it throws rather than dropping them silently), so
+    // SkillExtractor-style callers must stay on the standalone adapter.
+    const adapter: HostAdapter =
+      this.config.llm.provider === "bridge"
+        ? new BridgeHostAdapter({
+          dataDir: this.config.data.baseDir,
+          llmConfig: {
+            claudeBin: process.env.TDAI_CLAUDE_BIN,
+            // TDAI_LLM_MODEL carries an OpenAI-style default ("gpt-4o") that
+            // the CLI would reject, so only forward it when set explicitly.
+            model: process.env.TDAI_LLM_MODEL,
+            timeoutMs: this.config.llm.timeoutMs,
+          },
+          logger: this.logger,
+          platform: "gateway",
+        })
+        : new StandaloneHostAdapter({
+          dataDir: this.config.data.baseDir,
+          llmConfig: this.config.llm,
+          logger: this.logger,
+          platform: "gateway",
+        });
 
     // Create core
     //
